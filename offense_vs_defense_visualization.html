@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NFL Offense vs Defense – Interactive Scatter</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0b1020;
+            color: #f5f5f5;
+        }
+
+        #page {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px 16px 40px;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 12px;
+            color: #4CAF50;
+        }
+
+        h2 {
+            margin-top: 24px;
+            margin-bottom: 8px;
+            color: #ffd700;
+            font-size: 20px;
+        }
+
+        p {
+            margin-bottom: 6px;
+            line-height: 1.4;
+        }
+
+        #controls {
+            margin: 14px 0 8px;
+            padding: 10px 12px;
+            border-radius: 6px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.12);
+            font-size: 14px;
+        }
+
+        #plot {
+            width: 100%;
+            height: 520px;
+        }
+
+        #corrPlot {
+            width: 100%;
+            height: 260px;
+            margin-top: 16px;
+        }
+
+        #boxPlot {
+            width: 100%;
+            height: 260px;
+            margin-top: 16px;
+        }
+
+        /* Legend/key for the 2nd chart (kept outside Plotly to avoid overlaps) */
+        #corrLegend {
+            margin-top: 16px;
+            margin-bottom: 6px;
+            padding: 8px 10px;
+            border-radius: 6px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.12);
+            font-size: 13px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px 16px;
+            align-items: center;
+        }
+
+        #corrLegend .item {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            white-space: nowrap;
+        }
+
+        #corrLegend .swatch {
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
+            border: 1px solid rgba(255,255,255,0.35);
+        }
+
+        #status {
+            margin-top: 10px;
+            font-size: 14px;
+            color: #ccc;
+        }
+
+        code {
+            background: rgba(0,0,0,0.4);
+            padding: 2px 4px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div id="page">
+        <h1>🏈 NFL: Do Offense or Defense Predict Wins Better?</h1>
+
+        <h2>Dataset description</h2>
+        <p>
+            This visualization uses an NFL game dataset with well over 1,000 rows of regular‑season games.
+            Each row contains a team, points scored, points allowed, margin of victory, and other fields.
+            The data was collected from publicly available NFL statistics and pre‑processed into
+            <code>nfl_data.json</code> for this project.
+        </p>
+
+        <h2>Question</h2>
+        <p>
+            For NFL teams, is winning more strongly related to <strong>offense</strong>
+            (points scored) or to <strong>defense</strong> (points allowed)?
+        </p>
+
+        <div id="controls">
+            <strong>View:</strong>
+            <label>
+                <input type="radio" name="view" value="offense" checked>
+                Offense – Avg points scored vs win %
+            </label>
+            &nbsp;&nbsp;
+            <label>
+                <input type="radio" name="view" value="defense">
+                Defense – Avg points allowed vs win %
+            </label>
+        </div>
+
+        <div id="plot"></div>
+        <div id="corrLegend" aria-label="Legend for offense vs defense chart"></div>
+        <div id="corrPlot"></div>
+        <div id="boxPlot"></div>
+        <div id="status">Loading <code>nfl_data.json</code>…</div>
+
+        <h2>Interpretation</h2>
+        <p id="interpretationText">
+            Once the data loads, this section will summarize which side of the ball has a
+            stronger relationship with winning in this dataset.
+        </p>
+
+        <p style="margin-top: 10px; font-size: 13px; color: #aaaaaa;">
+            Note: If you open this file directly from your computer, some browsers block
+            loading <code>nfl_data.json</code>. To avoid that, run a simple local server
+            (for example: <code>python -m http.server</code>) and open this page via
+            <code>http://localhost:8000/offense_vs_defense_visualization.html</code>.
+        </p>
+    </div>
+
+    <!-- Plotly via CDN (no modules needed) -->
+    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+    <script>
+        let teamStats = [];
+
+        async function loadData() {
+            const statusEl = document.getElementById('status');
+            try {
+                statusEl.textContent = 'Loading nfl_data.json…';
+                const resp = await fetch('nfl_data.json');
+                if (!resp.ok) {
+                    throw new Error('HTTP ' + resp.status);
+                }
+                const data = await resp.json();
+
+                if (!data || !Array.isArray(data.games)) {
+                    throw new Error('Unexpected JSON format – expected data.games[]');
+                }
+
+                computeTeamStats(data.games);
+                updateInterpretation();
+
+                // Initial plots: offense view plus offense vs defense overlay and box plots
+                drawPlot('offense');
+                drawOffDefWinPlot();
+                drawBoxPlot();
+                statusEl.textContent =
+                    'Hover over points to see team details. Use the radio buttons to switch between offense and defense views.';
+            } catch (err) {
+                statusEl.innerHTML =
+                    'Error loading data: ' + err.message +
+                    '<br>If you opened this file directly from disk, run a local server so the browser can load nfl_data.json.';
+            }
+        }
+
+        function computeTeamStats(games) {
+            const byTeam = new Map();
+
+            for (const g of games) {
+                if (!g || !g.team) continue;
+                if (!byTeam.has(g.team)) {
+                    byTeam.set(g.team, []);
+                }
+                byTeam.get(g.team).push(g);
+            }
+
+            teamStats = [];
+
+            for (const [team, tg] of byTeam.entries()) {
+                if (!tg.length) continue;
+                let wins = 0;
+                let scored = 0;
+                let allowed = 0;
+
+                for (const g of tg) {
+                    const margin = Number(g.margin);
+                    const ps = Number(g.points_scored);
+                    const pa = Number(g.points_allowed);
+                    if (margin > 0) wins++;
+                    scored += isFinite(ps) ? ps : 0;
+                    allowed += isFinite(pa) ? pa : 0;
+                }
+
+                const gamesPlayed = tg.length;
+                teamStats.push({
+                    team,
+                    games: gamesPlayed,
+                    avgScored: scored / gamesPlayed,
+                    avgAllowed: allowed / gamesPlayed,
+                    winPct: (wins / gamesPlayed) * 100
+                });
+            }
+        }
+
+        function drawPlot(mode) {
+            if (!teamStats.length) return;
+
+            const x = [];
+            const y = [];
+            const hoverText = [];
+
+            for (const t of teamStats) {
+                const metric = mode === 'offense' ? t.avgScored : t.avgAllowed;
+                x.push(metric);
+                y.push(t.winPct);
+                hoverText.push(
+                    t.team +
+                    '<br>Games: ' + t.games +
+                    '<br>Avg points scored: ' + t.avgScored.toFixed(1) +
+                    '<br>Avg points allowed: ' + t.avgAllowed.toFixed(1)
+                );
+            }
+
+            const isOffense = mode === 'offense';
+            const trace = {
+                x,
+                y,
+                text: hoverText,
+                mode: 'markers',
+                type: 'scatter',
+                marker: {
+                    size: 9,
+                    color: isOffense ? '#4CAF50' : '#ff4444',
+                    opacity: 0.85
+                },
+                hovertemplate:
+                    '%{text}<br>' +
+                    (isOffense ? 'Avg points scored' : 'Avg points allowed') +
+                    ': %{x:.1f}<br>Win %: %{y:.1f}<extra></extra>'
+            };
+
+            const layout = {
+                title: isOffense
+                    ? 'Offense: Average Points Scored vs Win Percentage'
+                    : 'Defense: Average Points Allowed vs Win Percentage',
+                paper_bgcolor: '#0b1020',
+                plot_bgcolor: '#11172b',
+                font: { color: '#f5f5f5' },
+                margin: { t: 60, r: 20, b: 60, l: 60 },
+                xaxis: {
+                    title: isOffense
+                        ? 'Average Points Scored per Game'
+                        : 'Average Points Allowed per Game',
+                    gridcolor: '#333a55',
+                    zerolinecolor: '#555b7a'
+                },
+                yaxis: {
+                    title: 'Win Percentage',
+                    gridcolor: '#333a55',
+                    zerolinecolor: '#555b7a'
+                },
+                hovermode: 'closest'
+            };
+
+            Plotly.react('plot', [trace], layout);
+        }
+
+        // Second graph: overlay offense vs defense, colored by whether the team has a winning record
+        function drawOffDefWinPlot() {
+            if (!teamStats.length) return;
+
+            const winners = teamStats.filter(t => t.winPct >= 50);
+            const nonWinners = teamStats.filter(t => t.winPct < 50);
+
+            const makeTrace = (arr, name, color) => ({
+                x: arr.map(t => t.avgScored),
+                y: arr.map(t => t.avgAllowed),
+                text: arr.map(t =>
+                    t.team +
+                    '<br>Win %: ' + t.winPct.toFixed(1) +
+                    '<br>Avg points scored: ' + t.avgScored.toFixed(1) +
+                    '<br>Avg points allowed: ' + t.avgAllowed.toFixed(1)
+                ),
+                mode: 'markers',
+                type: 'scatter',
+                name,
+                marker: {
+                    size: 9,
+                    color,
+                    opacity: 0.9
+                },
+                hovertemplate:
+                    '%{text}<br>' +
+                    'Offense (points scored): %{x:.1f}<br>' +
+                    'Defense (points allowed): %{y:.1f}<extra>' + name + '</extra>'
+            });
+
+            const traces = [];
+            if (winners.length) {
+                traces.push(makeTrace(winners, 'Winning record (win % ≥ 50)', '#4CAF50'));
+            }
+            if (nonWinners.length) {
+                traces.push(makeTrace(nonWinners, 'Non‑winning record (win % < 50)', '#ff4444'));
+            }
+
+            // Render legend/key outside Plotly to prevent overlap with titles/axes
+            const legendEl = document.getElementById('corrLegend');
+            if (legendEl) {
+                const items = [];
+                if (winners.length) {
+                    items.push({ label: 'Winning record (win % ≥ 50)', color: '#4CAF50' });
+                }
+                if (nonWinners.length) {
+                    items.push({ label: 'Non‑winning record (win % < 50)', color: '#ff4444' });
+                }
+                legendEl.innerHTML = items.map(i =>
+                    '<span class="item">' +
+                    '<span class="swatch" style="background:' + i.color + '"></span>' +
+                    '<span>' + i.label + '</span>' +
+                    '</span>'
+                ).join('');
+            }
+
+            const layout = {
+                title: 'Offense vs Defense by Team, Colored by Winning Record',
+                paper_bgcolor: '#0b1020',
+                plot_bgcolor: '#11172b',
+                font: { color: '#f5f5f5' },
+                margin: { t: 60, r: 20, b: 60, l: 60 },
+                xaxis: {
+                    title: 'Average Points Scored per Game (Offense – higher is better)',
+                    gridcolor: '#333a55',
+                    zerolinecolor: '#555b7a'
+                },
+                yaxis: {
+                    title: 'Average Points Allowed per Game (Defense – lower is better)',
+                    gridcolor: '#333a55',
+                    zerolinecolor: '#555b7a'
+                },
+                hovermode: 'closest',
+                showlegend: false
+            };
+
+            Plotly.react('corrPlot', traces, layout);
+        }
+
+        // Third graph: box plots of offense and defense points, with win % in hover
+        function drawBoxPlot() {
+            if (!teamStats.length) return;
+
+            const offenseY = [];
+            const offenseText = [];
+            const defenseY = [];
+            const defenseText = [];
+
+            for (const t of teamStats) {
+                offenseY.push(t.avgScored);
+                offenseText.push(
+                    t.team +
+                    '<br>Win %: ' + t.winPct.toFixed(1) +
+                    '<br>Avg points scored: ' + t.avgScored.toFixed(1) +
+                    '<br>Avg points allowed: ' + t.avgAllowed.toFixed(1)
+                );
+                defenseY.push(t.avgAllowed);
+                defenseText.push(
+                    t.team +
+                    '<br>Win %: ' + t.winPct.toFixed(1) +
+                    '<br>Avg points scored: ' + t.avgScored.toFixed(1) +
+                    '<br>Avg points allowed: ' + t.avgAllowed.toFixed(1)
+                );
+            }
+
+            const offenseTrace = {
+                y: offenseY,
+                text: offenseText,
+                name: 'Offense – Avg points scored per game',
+                type: 'box',
+                boxpoints: 'all',
+                jitter: 0.35,
+                pointpos: -1.6,
+                marker: {
+                    color: '#4CAF50',
+                    size: 6,
+                    opacity: 0.7
+                },
+                line: { color: '#4CAF50' },
+                hovertemplate:
+                    '%{text}<br>' +
+                    'Offense points: %{y:.1f}<extra>Offense</extra>'
+            };
+
+            const defenseTrace = {
+                y: defenseY,
+                text: defenseText,
+                name: 'Defense – Avg points allowed per game',
+                type: 'box',
+                boxpoints: 'all',
+                jitter: 0.35,
+                pointpos: -1.6,
+                marker: {
+                    color: '#ff4444',
+                    size: 6,
+                    opacity: 0.7
+                },
+                line: { color: '#ff4444' },
+                hovertemplate:
+                    '%{text}<br>' +
+                    'Defense points allowed: %{y:.1f}<extra>Defense</extra>'
+            };
+
+            const layout = {
+                title: 'Offense vs Defense Points per Game (Box Plots with Win %)',
+                paper_bgcolor: '#0b1020',
+                plot_bgcolor: '#11172b',
+                font: { color: '#f5f5f5' },
+                margin: { t: 60, r: 20, b: 60, l: 60 },
+                yaxis: {
+                    title: 'Points per Game',
+                    gridcolor: '#333a55',
+                    zerolinecolor: '#555b7a'
+                },
+                xaxis: {
+                    title: '',
+                    showgrid: false
+                },
+                boxmode: 'group',
+                hovermode: 'closest',
+                showlegend: true
+            };
+
+            Plotly.react('boxPlot', [offenseTrace, defenseTrace], layout);
+        }
+
+        function correlation(xs, ys) {
+            const n = xs.length;
+            if (!n) return 0;
+            let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0, sumY2 = 0;
+            for (let i = 0; i < n; i++) {
+                const x = xs[i];
+                const y = ys[i];
+                sumX += x;
+                sumY += y;
+                sumXY += x * y;
+                sumX2 += x * x;
+                sumY2 += y * y;
+            }
+            const num = n * sumXY - sumX * sumY;
+            const den = Math.sqrt(
+                (n * sumX2 - sumX * sumX) *
+                (n * sumY2 - sumY * sumY)
+            );
+            return den ? num / den : 0;
+        }
+
+        function updateInterpretation() {
+            if (!teamStats.length) return;
+            const scored = teamStats.map(t => t.avgScored);
+            const allowed = teamStats.map(t => t.avgAllowed);
+            const wins = teamStats.map(t => t.winPct);
+
+            const offCorr = correlation(scored, wins);
+            const defCorr = correlation(allowed, wins);
+
+            const textEl = document.getElementById('interpretationText');
+            const stronger = Math.abs(offCorr) > Math.abs(defCorr) ? 'offense' : 'defense';
+
+            textEl.innerHTML =
+                'In this dataset, the linear correlation between team win percentage and ' +
+                '<strong>average points scored</strong> is ' + offCorr.toFixed(3) +
+                ', while the correlation with <strong>average points allowed</strong> is ' +
+                defCorr.toFixed(3) + '. ' +
+                'That means <strong>' + stronger + '</strong> shows the stronger overall ' +
+                'relationship with winning for these seasons. When you hover over points ' +
+                'in the scatter plot, you can see how individual teams compare.';
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            // Wire up the radio buttons to switch the view
+            const radios = document.querySelectorAll('input[name="view"]');
+            radios.forEach(radio => {
+                radio.addEventListener('change', () => {
+                    if (radio.checked) {
+                        drawPlot(radio.value);
+                    }
+                });
+            });
+
+            loadData();
+        });
+    </script>
+</body>
+</html>
